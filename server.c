@@ -62,8 +62,11 @@ static void setup_signal_handler()
     }
 }
 
-static void handle_client(int client_fd) 
+static void handle_client(int client_fd)
 {
+    struct timeval rcv_timeout = { .tv_sec = 2 };
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
+
     char buffer[COMMAND_BUFFER_MAX_SIZE] = {0};
     int pos = 0;
     char *new_line_pos = NULL;
@@ -224,7 +227,14 @@ int main(int argc, char *const argv[])
             continue;
         }
 
-        handle_client(client_fd);
+        // I learned about fork, I will use and abuse fork
+        pid_t handler_pid = fork();
+        if (handler_pid == 0) {
+            handle_client(client_fd);
+            return EXIT_SUCCESS;
+        } else {
+            close(client_fd);
+        }
     }
 
     printf("Closing...\n");
