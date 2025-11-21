@@ -9,25 +9,24 @@
   outputs = { self, nixpkgs, flake-utils }:
     {
       overlays = {
-        default = self.overlays.remote-bash-server;
-        remote-bash-server = (final: prev: {
-          remote-bash-server = self.packages.${prev.system}.default;
-        });
+        default = self.overlays.rem-bash;
+        rem-bash =
+          (final: prev: { rem-bash = self.packages.${prev.system}.default; });
       };
     } // flake-utils.lib.eachDefaultSystem (system:
       let pkgs = nixpkgs.legacyPackages.${system};
       in {
         packages.default = pkgs.clangStdenv.mkDerivation {
-          pname = "remote-bash-server";
-          version = "0.0.0";
+          pname = "rem-bash";
+          version = "0.0.1";
           src = ./server.c;
           dontUnpack = true;
           buildPhase = ''
-            clang $src -O3 -o remote-bash-server -DBASH_PATH='"${pkgs.bash}/bin/bash"'
+            clang $src -O3 -o rem-bash -DBASH_PATH='"${pkgs.bash}/bin/bash"'
           '';
           installPhase = ''
             mkdir -p $out/bin
-            cp remote-bash-server $out/bin/remote-bash-server
+            cp rem-bash $out/bin/rem-bash
           '';
         };
       });
