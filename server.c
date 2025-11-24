@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <assert.h>
+#include <sys/wait.h>
 
 // Used to be able to configure the bash path at compile time
 #ifndef BASH_PATH
@@ -62,10 +63,10 @@ static void setup_signal_handler()
     }
 }
 
-static void handle_client(int client_fd)
+static int handle_client(int client_fd)
 {
-    struct timeval rcv_timeout = { .tv_sec = 2 };
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
+    struct timeval recv_timeout = { .tv_sec = 2 };
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
 
     char buffer[COMMAND_BUFFER_MAX_SIZE] = {0};
     int pos = 0;
@@ -77,7 +78,7 @@ static void handle_client(int client_fd)
         if (bytesRead < 0) {
             perror("recv");
             close(client_fd);
-            return;
+            return EXIT_FAILURE;
         }
 
         new_line_pos = strchr(buffer + pos, '\n');
@@ -91,32 +92,24 @@ static void handle_client(int client_fd)
     if (new_line_pos == NULL) {
         // We did not find a new line, so the command is not valid. Bail.
         close(client_fd);
-        return;
+        return EXIT_FAILURE;
     }
 
     // NULL-terminated the buffer at the new line position
     *new_line_pos = 0;
-    printf("Running: %s", buffer);
 
-    pid_t pid = fork();
-    if (pid < 0)  {
-        perror("fork");
-        close(client_fd);
-        return;
-    }
+    fprintf(stderr, "Running: %s\n", buffer);
 
-    if (pid == 0) {
-        close(client_fd);
-
-        char *argv[] = { BASH_PATH, "-c", buffer, NULL};
-        extern char **environ;
-        execve(argv[0], argv, environ);
-
-        // The child was not able to replace the process. Bail.
-        exit(EXIT_FAILURE);
-    }
-
+    // We got the command to be executed, the connection should be closed now
     close(client_fd);
+
+    // Replace the process with the bash process
+    char *argv[] = { BASH_PATH, "-c", buffer, NULL};
+    extern char **environ;
+    execve(argv[0], argv, environ);
+
+    // only reachable if execve failed
+    return EXIT_FAILURE;
 }
 
 struct arguments {
@@ -172,7 +165,7 @@ static struct arguments parse_arguments(int argc, char *const argv[])
         }
     }
 
-    return (struct arguments){ .host = host, .port = port};
+    return (struct arguments){ .host = host, .port = port };
 }
 
 int main(int argc, char *const argv[])
@@ -211,13 +204,11 @@ int main(int argc, char *const argv[])
     char host_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &args.host.s_addr, host_str, sizeof(host_str));
 
-    printf("Running bash command from %s\n", BASH_PATH);
-    printf("Listening on %s:%d PID: %d\n", host_str, ntohs(args.port), getpid());
+    fprintf(stderr, "Running bash command from %s\n", BASH_PATH);
+    fprintf(stderr, "Listening on %s:%d PID: %d\n", host_str, ntohs(args.port), getpid());
 
     is_accepting_requests = 1;
     while(is_accepting_requests) {
-        fflush(stdout);
-
         struct sockaddr_in client_address;
         socklen_t client_address_len = sizeof(client_address);
         int client_fd = accept(listen_fd, (struct sockaddr *)&client_address, &client_address_len);
@@ -230,15 +221,15 @@ int main(int argc, char *const argv[])
         // I learned about fork, I will use and abuse fork
         pid_t handler_pid = fork();
         if (handler_pid == 0) {
-            handle_client(client_fd);
-            return EXIT_SUCCESS;
+            return handle_client(client_fd);
         } else {
             close(client_fd);
         }
     }
 
-    printf("Closing...\n");
+    fprintf(stderr, "Closing...\n");
 
+    // TODO: wait for children to finish
     close(listen_fd);
 
     return EXIT_SUCCESS;
