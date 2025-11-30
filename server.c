@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <assert.h>
 #include <sys/wait.h>
+#include <linux/limits.h>
 
 // Used to be able to configure the bash path at compile time
 #ifndef BASH_PATH
@@ -22,6 +23,7 @@
 #define LISTEN_BACKLOG 10
 // Should be plenty of space to receive any commands, at least for the current use-case
 #define COMMAND_BUFFER_MAX_SIZE 4096
+#define MAX_SECRET_SIZE (128 + 1)
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
@@ -63,7 +65,18 @@ static void setup_signal_handler()
     }
 }
 
-static int handle_client(int client_fd)
+static int str_prefix(const char *restrict prefix, const char *restrict string)
+{
+    while(*prefix) {
+        if (*prefix++ != *string++) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int handle_client(int client_fd, char secret[MAX_SECRET_SIZE])
 {
     struct timeval recv_timeout = { .tv_sec = 2 };
     setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
@@ -98,13 +111,20 @@ static int handle_client(int client_fd)
     // NULL-terminated the buffer at the new line position
     *new_line_pos = 0;
 
-    fprintf(stderr, "Running: %s\n", buffer);
+    if (!str_prefix(secret, buffer)) {
+        fprintf(stderr, "Secret didn't match. Not running request");
+        return EXIT_FAILURE;
+    }
+
+    char *const command_str =  buffer + strlen(secret);
+
+    fprintf(stderr, "Running: %s\n", command_str);
 
     // We got the command to be executed, the connection should be closed now
     close(client_fd);
 
     // Replace the process with the bash process
-    char *argv[] = { BASH_PATH, "-c", buffer, NULL};
+    char *const argv[] = { BASH_PATH, "-c", command_str, NULL};
     extern char **environ;
     execve(argv[0], argv, environ);
 
@@ -115,28 +135,32 @@ static int handle_client(int client_fd)
 struct arguments {
     struct in_addr host;
     in_port_t port;
+    char secret_path[PATH_MAX];
 };
 
 static struct arguments parse_arguments(int argc, char *const argv[]) 
 {
-    struct in_addr host = { .s_addr = htonl(INADDR_LOOPBACK) };
-    in_port_t port = htons(1337);
+    struct arguments args = {
+        .host = { .s_addr = htonl(INADDR_LOOPBACK) },
+        .port = htons(1337),
+    };
 
     struct option long_options[] = {
         { .name = "host", .has_arg = 1, .flag = NULL, .val = 'H' },
         { .name = "port", .has_arg = 1, .flag = NULL, .val = 'p' },
+        { .name = "secret-path", .has_arg = 1, .flag = NULL, .val = 's' },
         // { .name = "--help", .has_arg = 0, .flag = NULL, .val = 'h' },
         {0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, ":H:p:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, ":H:p:s:", long_options, NULL)) != -1) {
         unsigned long parsed_port;
         char *port_endptr;
 
         switch (opt) {
         case 'H':
-            if (inet_aton(optarg, &host) == 0) {
+            if (inet_aton(optarg, &args.host) == 0) {
                 fprintf(stderr, "error: Invalid host: %s\n", optarg);
                 exit(EXIT_FAILURE);
             }
@@ -153,7 +177,10 @@ static struct arguments parse_arguments(int argc, char *const argv[])
                 exit(EXIT_FAILURE);
             }
 
-            port = htons((uint16_t)parsed_port);
+            args.port = htons((uint16_t)parsed_port);
+            break;
+        case 's':
+            strncpy(args.secret_path, optarg, ARRAY_SIZE(args.secret_path));
             break;
         case ':':
             fprintf(stderr, "error: Missing argument for option -%c\n", optopt);
@@ -165,12 +192,31 @@ static struct arguments parse_arguments(int argc, char *const argv[])
         }
     }
 
-    return (struct arguments){ .host = host, .port = port };
+    return args;
+}
+
+static size_t read_contents(const char *path, char *out, size_t out_size)
+{
+    FILE *file = fopen(path, "r");
+    size_t read = fread(out, sizeof(out[0]), sizeof(out[0]) * out_size, file);
+
+    fclose(file);
+    return read;
 }
 
 int main(int argc, char *const argv[])
 {
     struct arguments args = parse_arguments(argc, argv);
+    char secret[MAX_SECRET_SIZE] = {};
+
+    // secret path was specified, read it
+    if (args.secret_path[0] != '\0') {
+        size_t read = read_contents(args.secret_path, secret, ARRAY_SIZE(secret));
+        if (read >= MAX_SECRET_SIZE) {
+            fprintf(stderr, "The secret was larger than %d", MAX_SECRET_SIZE - 1);
+            return EXIT_FAILURE;
+        }
+    }
 
     setup_signal_handler();
 
@@ -221,7 +267,7 @@ int main(int argc, char *const argv[])
         // I learned about fork, I will use and abuse fork
         pid_t handler_pid = fork();
         if (handler_pid == 0) {
-            return handle_client(client_fd);
+            return handle_client(client_fd, secret);
         } else {
             close(client_fd);
         }
